@@ -4,17 +4,23 @@ from functionApproximators import interpolate_function
 from functionApproximators import GBF
 # Parameters
 ALPHA = -1*math.log(0.01) # Alpha that leads to 99% convergence
-T = 6
-K = 100
+T = 4
+K = 70
 D = 2*math.sqrt(K)
-numFuncs = 30
+numPoints = 40
+numFuncs = 40*2+2
 centers = []
+widths = []
 curr = 1
+width = 1.0
 for i in range(numFuncs):
     centers.append(curr)
-    curr = curr/float(1.3)
-widths = [0.1]*numFuncs
-print(centers)
+    curr = curr/float(1.258925412)
+    widths.append(width)
+    width = width/float(1.06)
+
+# obstacle
+OBSTACLE = [3,0]
 
 # Returns DMP parameters
 # trajectory --> n rows (num points) and m columns (dimension of data)
@@ -44,6 +50,9 @@ def DMPLearning(trajectory, K, D):
                 v[i] = T*((x[i] - x[i-1])/float(traj[i]['t'] - traj[i-1]['t']))
                 v_dot[i-1] = (v[i] - v[i-1])/float(traj[i]['t'] - traj[i-1]['t'])
 
+            v_dot[len(x)-1] = 0
+            v[len(x)-1] = 0
+
             #print(v)
             # print(v_dot)
             # Solution to canonical system is s(t) = math.exp(-t*alpha/T)
@@ -57,9 +66,19 @@ def DMPLearning(trajectory, K, D):
                 f_target.append(entry)
         if(num_demos > 1):
             inputs = [entry["s"] for entry in f_target]
+            for i in range(len(inputs)):
+                centers[i] = inputs[i]
             outputs = [entry["value"] for entry in f_target]
+            # if(dim == 0):
+            #     print("dim " + str(dim))
+            #     for i in range(len(inputs)):
+            #         print(str(inputs[i]) + " " + str(outputs[i]))
             gbf = GBF(numFuncs, centers, widths)
             gbf.train(inputs, outputs)
+            # if(dim == 0):
+            #     print("====")
+            #     for i in range(len(inputs)):
+            #         print(str(inputs[i]) + " " + str(gbf.predict(inputs[i])))
             elem["f"] = gbf
         else:
             elem["f"] = f_target
@@ -74,15 +93,16 @@ def DMPPlanning(parameters, startPos, startVel, endPos, T_new, dt):
     velocities.append([float(i) for i in startVel])
 
     dimensions = len(startPos)
-    for i in range(1, math.ceil(T_new/float(dt))+10):
+    for i in range(1, math.ceil(T_new/float(dt)+1)):
         S = math.exp(-dt*(i-1)*ALPHA/T_new)
         point = [0]*dimensions
         velocity = [0]*dimensions
-        #print("S(" + str(S) + ") ==> " + str(interpolate_function(S, parameters)))
+        couplingTerm = getAccelerationVector(getDist(plan[i-1]['coord'],OBSTACLE),plan[i-1]['coord'],OBSTACLE)
+        # print(couplingTerm)
         for dim in range(dimensions):
             v_dot = 0
             if(num_demos == 1):
-                v_dot = (K*(endPos[dim] - plan[i-1]['coord'][dim]) - D*velocities[i-1][dim] - K*(endPos[dim] - plan[0]['coord'][dim])*S + K*interpolate_function(S, parameters[dim]))/float(T_new)
+                v_dot = (K*(endPos[dim] - plan[i-1]['coord'][dim]) - D*velocities[i-1][dim] - K*(endPos[dim] - plan[0]['coord'][dim])*S + K*interpolate_function(S, parameters[dim]) + couplingTerm[dim])/float(T_new)
             else:
                 v_dot = (K*(endPos[dim] - plan[i-1]['coord'][dim]) - D*velocities[i-1][dim] - K*(endPos[dim] - plan[0]['coord'][dim])*S + K*parameters[dim]['f'].predict(S))/float(T_new)
             velocity[dim] = velocities[i-1][dim] + dt*v_dot
@@ -98,20 +118,35 @@ def DMPPlanning(parameters, startPos, startVel, endPos, T_new, dt):
 ##############################################################
 # Helper functions to turn any function into points
 ##############################################################
+# Get Euclidean distance
+def getDist(x,y):
+    return math.sqrt(math.pow(x[0]-y[0],2) + math.pow(x[1]-y[1],2))
+
+def getAccelerationVector(dist,point,obstacle):
+    forceMultiplier = 500
+    stdv = 1
+    acceleration = forceMultiplier*math.exp(-math.pow(dist,2)/(2*math.pow(stdv,2)))
+    displacement = [(point[0] - obstacle[0])*acceleration/dist, (point[1] - obstacle[1])*acceleration/dist]
+    return displacement
+
 # Function you are trying to approximate
 def f(x):
-    return -(x-3)**2 + 9
+    return math.sin(x)
 
 def addNoise(x):
-    return np.random.normal(scale=0.05) + x
+    return np.random.normal(scale=0.1) + x
 
-def getCoordinates(func, startx, endx, numPoints):
-    dx = (endx - startx)/float(numPoints-1)
-    coords = [0]*numPoints
+def getCoordinates(func, startx, endx, numPoints, noise):
+    dx = (endx - startx)/float(numPoints)
+    coords = [0]*(numPoints+1)
     points = 0
     x = startx
-    while points < numPoints:
-        coord = {"coord" : [addNoise(x),addNoise(func(x))] ,"t": x}
+    while points <= numPoints:
+        coord = {}
+        if(noise):
+            coord = {"coord" : [addNoise(x),addNoise(func(x))] ,"t": T*points/float(numPoints)}
+        else:
+            coord = {"coord" : [x,func(x)] ,"t": T*points/float(numPoints)}
         coords[points] = coord
         x = x + dx
         points = points + 1
@@ -132,28 +167,29 @@ def combineTrajectories(trajectories):
 # gbf.train(input,output)
 # exit()
 
-traj1 = getCoordinates(f, 0, 2*math.pi, 20)
-traj2 = getCoordinates(f, 0, 2*math.pi, 20)
-traj = [traj1, traj2]
+traj1 = getCoordinates(f, 0, 4*math.pi, numPoints, False)
+#traj2 = getCoordinates(f, 0, 4*math.pi, numPoints, True)
+#traj = [traj1, traj2]
+traj = [traj1]
 model = DMPLearning(traj, K, D)
 # for item in model:
 #     for elem in item['f']:
 #         print(elem)
-plan = DMPPlanning(model, [0,0], [0,0], [10,10], 10, 0.5)
+plan = DMPPlanning(model, [0,0], [0,0], [4*math.pi,0], T, 0.1)
 print("==========GIVEN TRAJECTORY==========")
-print('{:>5} | {}'.format('t','coord'))
+print('{:>5}\t{}'.format('t','coord'))
 print("-"*20)
 for i in traj[0]:
-    print('{:>5.2f} | {}'.format(i["t"],'   '.join(['{:3.3f}'.format(elem) for elem in i["coord"]])))
+    print('{:>5.2f}\t{}'.format(i["t"],'   '.join(['{:3.3f}'.format(elem) for elem in i["coord"]])))
 
-for i in traj[1]:
-    print('{:>5.2f} | {}'.format(i["t"],'   '.join(['{:3.3f}'.format(elem) for elem in i["coord"]])))
+# for i in traj[1]:
+#     print('{:>5.2f}\t{}'.format(i["t"],'   '.join(['{:3.3f}'.format(elem) for elem in i["coord"]])))
 
 print("\n")
 print("=" * 10)
 print("\n")
 print("==========PLANNED TRAJECTORY==========")
-print('{:>5} | {}'.format('t','coord'))
+print('{:>5}\t{}'.format('t','coord'))
 print("-"*20)
 for i in plan:
-    print('{:>5.2f} | {}'.format(i["t"],'   '.join(['{:3.3f}'.format(elem) for elem in i["coord"]])))
+    print('{:>5.2f}\t{}'.format(i["t"],'   '.join(['{:3.3f}'.format(elem) for elem in i["coord"]])))
